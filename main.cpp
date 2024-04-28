@@ -2,6 +2,7 @@
 #include <iostream>
 #include <istream>
 #include <sstream>
+#include <string>
 #include <unistd.h>
 #include <vector>
 
@@ -12,7 +13,7 @@
 #include <sys/time.h>
 #include <sys/types.h>
 #define KQUEUE
-#define NEVENTS 256
+#define NEVENTS 64
 #endif
 #include <fcntl.h>
 
@@ -22,7 +23,7 @@ struct Client {
     int fd;
     struct sockaddr addr;
     socklen_t socklen;
-    std::vector<char> *read_buffer;
+    std::vector<char> read_buffer;
     std::vector<char> write_buffer;
     size_t nwritten;
 
@@ -33,7 +34,6 @@ struct Client {
         this->fd = fd;
         this->addr = addr;
         this->socklen = socklen;
-        this->read_buffer = new std::vector<char>;
         this->nwritten = 0;
     }
 
@@ -46,12 +46,15 @@ struct Client {
 };
 
 struct HttpServer {
+  private:
     const char *m_host;
     const char *m_port;
     int m_backlog;
     int m_accept_fd;
     Client m_clients[1024]; // FIXME size
     void (*m_request_handler)(Client *, HttpRequest *);
+    void (*m_connect_handler)(Client *);
+    void (*m_disconnect_handler)(Client *);
 #ifdef KQUEUE
     int m_kq;
 #endif
@@ -131,24 +134,30 @@ struct HttpServer {
 
         m_clients[client_fd] = Client(client_fd, client_addr, client_len);
 
-        printf("client connected fd: %d\n", client_fd);
+        if (m_connect_handler) {
+            m_connect_handler(&m_clients[client_fd]);
+        }
+
         return 0;
     }
 
     int handle_close(Client *client) {
+        if (m_disconnect_handler) {
+            m_disconnect_handler(client);
+        }
+
         if (close(client->fd) < 0) {
             perror("close");
             return -1;
         }
 
-        printf("client disconnected fd: %d\n", client->fd);
         return 0;
     }
 
     int handle_read(Client *client) {
         char buf[1024];
         size_t nread = recv(client->fd, buf, sizeof(buf), 0);
-        client->read_buffer->insert(client->read_buffer->end(), buf, buf + nread);
+        client->read_buffer.insert(client->read_buffer.end(), buf, buf + nread);
 
         bool has_complete_header = false;
         for (int i = 0; i < 1024; i++) { // check for \r\n\r\n
@@ -160,7 +169,7 @@ struct HttpServer {
         }
 
         if (has_complete_header) {
-            HttpRequest request = HttpRequest::parse(client->read_buffer->data());
+            HttpRequest request = HttpRequest::parse(client->read_buffer.data());
 
             m_request_handler(client, &request);
 
@@ -182,8 +191,14 @@ struct HttpServer {
         }
 
         if (nwritten == client->write_buffer.size()) {
-            if (close(client->fd) < 0) {
-                perror("close");
+            client->write_buffer.clear();
+            client->nwritten = 0;
+
+            struct kevent changelist;
+            EV_SET(&changelist, client->fd, EVFILT_WRITE, EV_DISABLE, 0, 0, NULL);
+            if (kevent(m_kq, &changelist, 1, NULL, 0, NULL) < 0) {
+                perror("kevent after recv");
+                return -1;
             }
         } else {
             client->nwritten = nwritten;
@@ -198,10 +213,11 @@ struct HttpServer {
         m_port = port;
         m_backlog = 1024;
         m_request_handler = request_handler;
+        m_connect_handler = NULL;
+        m_disconnect_handler = NULL;
     }
 
     int run() {
-        printf("listening on %s:%s\n", m_host, m_port);
         do_listen();
 
 #ifdef KQUEUE
@@ -229,7 +245,7 @@ struct HttpServer {
                     handle_accept();
                 }
 
-                else if (events[i].flags == EV_EOF) {
+                else if (events[i].flags & EV_EOF) {
                     handle_close(&m_clients[event_fd]);
                 }
 
@@ -244,23 +260,53 @@ struct HttpServer {
 #endif
         }
     }
+
+    void set_connect_handler(void (*hnd)(Client *)) {
+        m_connect_handler = hnd;
+    }
+
+    void set_disconnect_handler(void (*hnd)(Client *)) {
+        m_disconnect_handler = hnd;
+    }
 };
 
+static int counter = 0;
+
+void connect_handler(Client *client) {
+    printf("[%d]: Connected\n", client->fd);
+}
+
+void disconnect_handler(Client *client) {
+    printf("[%d]: Disconnected\n", client->fd);
+}
+
 void request_handler(Client *client, HttpRequest *request) {
-    printf("METHOD: %s\n", request->method_str.c_str());
-    printf("PATH: %s\n", request->path.c_str());
-    if (request->content_length > 0) {
-        write(STDOUT_FILENO, request->content, request->content_length);
-        printf("\n\n");
-    }
-    client->write("HTTP/1.1 200 OK\r\n\r\n");
+    printf("[%d]: %s %s\n", client->fd, request->method_str.c_str(), request->path.c_str());
+    // if (request->content_length > 0) {
+    //     write(STDOUT_FILENO, request->content, request->content_length);
+    //     printf("\n\n");
+    // }
+
+    std::string body = std::to_string(counter++);
+    std::string content_length = std::to_string(body.length());
+    client->write("HTTP/1.1 200 OK\r\nContent-Length: ");
+    client->write(content_length);
+    client->write("\r\n\r\n");
+    client->write(body);
 }
 
 int main(int argc, char const *argv[]) {
-    HttpServer httpServer("127.0.0.1", "8080", request_handler);
+    auto const host = "127.0.0.1";
+    auto const port = "8080";
+    printf("listening on %s:%s\n", host, port);
+
+    HttpServer httpServer(host, port, request_handler);
+    httpServer.set_connect_handler(connect_handler);
+    httpServer.set_disconnect_handler(disconnect_handler);
     int status = httpServer.run();
     if (status < 0) {
         perror("failed to start the server");
     }
+
     return 0;
 }
