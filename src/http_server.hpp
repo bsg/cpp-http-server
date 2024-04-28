@@ -1,6 +1,12 @@
+#ifndef HTTP_HPP
+#define HTTP_HPP
+
 #include <cstdio>
+#include <fcntl.h>
 #include <iostream>
 #include <istream>
+#include <map>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <unistd.h>
@@ -15,9 +21,151 @@
 #define KQUEUE
 #define NEVENTS 64
 #endif
-#include <fcntl.h>
 
-#include "http.hpp"
+// TODO case-insensitive header names
+struct HttpHeader {
+    std::map<std::string, std::string> fields;
+
+    static HttpHeader parse(std::istringstream *stream) {
+        HttpHeader header;
+
+        for (std::string line; std::getline(*stream, line);) {
+            if (line.starts_with("\r")) {
+                break;
+            }
+
+            if (line.ends_with("\r")) { // TODO fail if no \r?
+                line.pop_back();
+            }
+
+            int split_at = line.find(':');
+            if (split_at) {
+                std::string key = line.substr(0, split_at);
+                while (isspace(line[++split_at]))
+                    ;
+                std::string value = line.substr(split_at, line.length());
+
+                header.fields.insert({key, value});
+            } else {
+                // TODO
+            }
+        }
+
+        return header;
+    }
+
+    std::optional<std::string> get(std::string key) {
+        if (this->fields.count(key)) {
+            return (this->fields)[key];
+        } else {
+            return {};
+        }
+    }
+
+    void set(std::string key, std::string val) {
+        this->fields.insert({key, val});
+    }
+};
+
+enum class HttpMethod { GET, HEAD, POST, PUT, DELETE, CONNECT, OPTIONS, TRACE, PATCH };
+static std::optional<HttpMethod> method_from_str(std::string s) {
+    if (s.compare("GET")) {
+        return HttpMethod::GET;
+    } else if (s.compare("HEAD")) {
+        return HttpMethod::HEAD;
+    } else if (s.compare("POST")) {
+        return HttpMethod::POST;
+    } else if (s.compare("PUT")) {
+        return HttpMethod::PUT;
+    } else if (s.compare("DELETE")) {
+        return HttpMethod::DELETE;
+    } else if (s.compare("CONNECT")) {
+        return HttpMethod::CONNECT;
+    } else if (s.compare("OPTIONS")) {
+        return HttpMethod::OPTIONS;
+    } else if (s.compare("TRACE")) {
+        return HttpMethod::TRACE;
+    } else if (s.compare("PATCH")) {
+        return HttpMethod::PATCH;
+    }
+    return {};
+}
+
+struct HttpRequest {
+    HttpMethod method;
+    std::string method_str;
+    std::string path;
+    HttpHeader header;
+    int content_length;
+    char *content;
+
+    static HttpRequest parse(char *p) {
+        std::istringstream is(p);
+
+        std::string line;
+        std::getline(is, line);
+        int split_at = line.find(" ");
+        auto method_str = line.substr(0, split_at);
+        line = line.substr(split_at + 1);
+        split_at = line.find(" ");
+        auto path = line.substr(0, split_at);
+
+        HttpMethod method;
+        if (auto m = method_from_str(method_str)) {
+            method = *m;
+        } else {
+            // TODO
+        }
+        HttpHeader header = HttpHeader::parse(&is);
+
+        char *content = p + is.tellg();
+
+        int content_length = 0;
+        if (auto l = header.get("Content-Length")) {
+            content_length = std::stoi(*l);
+        }
+
+        return {.method = method,
+                .method_str = method_str,
+                .path = path,
+                .header = header,
+                .content_length = content_length,
+                .content = content};
+    }
+};
+
+struct HttpResponse {
+    int status;
+    HttpHeader header;
+    size_t content_length;
+    std::string content;
+};
+
+struct HttpResponseBuilder {
+    HttpResponse response;
+
+    HttpResponseBuilder *status(int status) {
+        this->response.status = status;
+        return this;
+    }
+
+    HttpResponseBuilder *header(std::string name, std::string value) {
+        this->response.header.set(name, value);
+        return this;
+    }
+
+    HttpResponseBuilder *body(std::string body) {
+        auto len = body.length();
+        this->response.content_length = len;
+        this->header("Content-Length", std::to_string(len));
+        this->response.content = body;
+        return this;
+    }
+
+    HttpResponse build() {
+        return this->response;
+    }
+};
 
 struct Client {
     int fd;
@@ -42,6 +190,31 @@ struct Client {
         for (auto c : s) {
             this->write_buffer.push_back(c);
         }
+    }
+
+    int send(HttpResponse *response) {
+        write("HTTP/1.1 ");
+        write(std::to_string(response->status));
+        switch (response->status) {
+        case 200:
+            write(" OK\r\n");
+            break;
+        default:
+            return -1;
+        }
+
+        for (auto const &[key, val] : response->header.fields) {
+            write(key);
+            write(": ");
+            write(val);
+            write("\r\n");
+        }
+
+        write("\r\n");
+
+        write(response->content); // TODO respect content_length
+
+        return 0;
     }
 };
 
@@ -270,43 +443,4 @@ struct HttpServer {
     }
 };
 
-static int counter = 0;
-
-void connect_handler(Client *client) {
-    printf("[%d]: Connected\n", client->fd);
-}
-
-void disconnect_handler(Client *client) {
-    printf("[%d]: Disconnected\n", client->fd);
-}
-
-void request_handler(Client *client, HttpRequest *request) {
-    printf("[%d]: %s %s\n", client->fd, request->method_str.c_str(), request->path.c_str());
-    // if (request->content_length > 0) {
-    //     write(STDOUT_FILENO, request->content, request->content_length);
-    //     printf("\n\n");
-    // }
-
-    std::string body = std::to_string(counter++);
-    std::string content_length = std::to_string(body.length());
-    client->write("HTTP/1.1 200 OK\r\nContent-Length: ");
-    client->write(content_length);
-    client->write("\r\n\r\n");
-    client->write(body);
-}
-
-int main(int argc, char const *argv[]) {
-    auto const host = "127.0.0.1";
-    auto const port = "8080";
-    printf("listening on %s:%s\n", host, port);
-
-    HttpServer httpServer(host, port, request_handler);
-    httpServer.set_connect_handler(connect_handler);
-    httpServer.set_disconnect_handler(disconnect_handler);
-    int status = httpServer.run();
-    if (status < 0) {
-        perror("failed to start the server");
-    }
-
-    return 0;
-}
+#endif
