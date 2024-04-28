@@ -69,23 +69,23 @@ struct HttpHeader {
 
 enum class HttpMethod { GET, HEAD, POST, PUT, DELETE, CONNECT, OPTIONS, TRACE, PATCH };
 static std::optional<HttpMethod> method_from_str(std::string s) {
-    if (s.compare("GET")) {
+    if (s == "GET") {
         return HttpMethod::GET;
-    } else if (s.compare("HEAD")) {
+    } else if (s == "HEAD") {
         return HttpMethod::HEAD;
-    } else if (s.compare("POST")) {
+    } else if (s == "POST") {
         return HttpMethod::POST;
-    } else if (s.compare("PUT")) {
+    } else if (s == "PUT") {
         return HttpMethod::PUT;
-    } else if (s.compare("DELETE")) {
+    } else if (s == "DELETE") {
         return HttpMethod::DELETE;
-    } else if (s.compare("CONNECT")) {
+    } else if (s == "CONNECT") {
         return HttpMethod::CONNECT;
-    } else if (s.compare("OPTIONS")) {
+    } else if (s == "OPTIONS") {
         return HttpMethod::OPTIONS;
-    } else if (s.compare("TRACE")) {
+    } else if (s == "TRACE") {
         return HttpMethod::TRACE;
-    } else if (s.compare("PATCH")) {
+    } else if (s == "PATCH") {
         return HttpMethod::PATCH;
     }
     return {};
@@ -157,12 +157,12 @@ struct HttpResponseBuilder {
     HttpResponseBuilder *body(std::string body) {
         auto len = body.length();
         this->response.content_length = len;
-        this->header("Content-Length", std::to_string(len));
         this->response.content = body;
         return this;
     }
 
     HttpResponse build() {
+        this->header("Content-Length", std::to_string(this->response.content_length));
         return this->response;
     }
 };
@@ -199,6 +199,16 @@ struct Client {
         case 200:
             write(" OK\r\n");
             break;
+        case 400:
+            write(" Bad Request\r\n");
+            break;
+        case 404:
+            write(" Not Found\r\n");
+            break;
+        case 500:
+            write(" Internal Server Error\r\n");
+            break;
+        // TODO handle all cases & maybe extract this out
         default:
             return -1;
         }
@@ -352,6 +362,8 @@ struct HttpServer {
                 perror("kevent after recv");
                 return -1;
             }
+
+            client->read_buffer.clear();
         }
         return 0;
     }

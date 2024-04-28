@@ -20,11 +20,16 @@ void request_handler(Client *client, HttpRequest *request) {
     //     printf("\n\n");
     // }
 
-    std::string body = std::to_string(counter++);
-
     HttpResponseBuilder builder;
-    auto response = builder.status(200)->body(body)->build();
-    client->send(&response);
+    if (request->method == HttpMethod::GET && request->path.compare("/") == 0) {
+        std::string body = std::to_string(counter++);
+
+        auto response = builder.status(200)->body(body)->build();
+        client->send(&response);
+    } else {
+        auto response = builder.status(404)->build();
+        client->send(&response);
+    }
 }
 
 int main(int argc, char const *argv[]) {
